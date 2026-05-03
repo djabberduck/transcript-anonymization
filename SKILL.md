@@ -54,6 +54,47 @@ Does not work in Cowork. Setup instructions below.
 Placeholders are consistent within each transcript — the same name always
 gets the same tag throughout a file.
 
+### Instructions for Claude (Path A)
+
+When this skill is triggered, Claude must follow these steps exactly:
+
+**Pass 1 — Anonymize**
+
+Read the transcript and replace all PII with consistent, numbered placeholders:
+- Person names → `[PERSON_1]`, `[PERSON_2]`, etc. (same name = same tag throughout)
+- Company and organisation names → `[COMPANY_1]`, `[COMPANY_2]`, etc.
+- Email addresses → `[EMAIL_1]`, `[EMAIL_2]`, etc.
+- Phone numbers → `[PHONE_1]`, `[PHONE_2]`, etc.
+
+**Pass 2 — Verify**
+
+Re-read the anonymized output and check specifically for:
+- First names used alone — "I asked Sarah to review it"
+- Names after relationship words — "my manager Dave", "my colleague Tom"
+- Names in possessives — "John's team", "Maria's approach"
+- Indirect identifiers — role + location + industry combinations that could
+  re-identify a participant even without a name
+- Unique references — "after my TEDx talk", internal project codenames
+- Named third parties mentioned in passing that were missed in Pass 1
+
+Apply any additional replacements found in Pass 2.
+
+**Output**
+
+Return two things:
+1. The fully anonymized transcript
+2. A substitution log listing every replacement made, in this format:
+
+```
+SUBSTITUTION LOG
+----------------
+[PERSON_1] = original name (N occurrences)
+[PERSON_2] = original name (N occurrences)
+[COMPANY_1] = original name (N occurrences)
+...
+Pass 2 additions: [list any additional replacements found, or "none"]
+```
+
 ### How to trigger
 
 Upload the transcript file and say:
