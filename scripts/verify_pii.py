@@ -29,7 +29,7 @@ import anthropic
 DEFAULT_SAMPLE_SIZE = 3
 
 # Claude model to use
-MODEL = "claude-sonnet-4-20250514"
+MODEL = "claude-sonnet-4-6"
 
 # Approximate max chars to send per transcript (avoids token limit issues)
 # ~6000 chars ≈ ~1500 tokens of transcript content

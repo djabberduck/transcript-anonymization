@@ -31,6 +31,32 @@ PLACEHOLDER_MAP = {
     "ORGANIZATION": "COMPANY",
 }
 
+# Regex patterns that should never be tagged as PII regardless of Presidio's verdict
+# Covers: HH:MM:SS and HH:MM timestamps common in interview transcripts
+FALSE_POSITIVE_PATTERNS = [
+    re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$"),  # timestamps: 00:05:40, 1:23, 01:23:45
+]
+
+# Well-known product/brand names Presidio misidentifies as PERSON
+FALSE_POSITIVE_NAMES = {
+    "gmail", "youtube", "google", "safari", "chrome", "firefox",
+    "netflix", "spotify", "slack", "notion", "figma", "zoom",
+    "instagram", "facebook", "twitter", "tiktok", "linkedin",
+}
+
+
+def is_false_positive(text: str, entity_type: str) -> bool:
+    """Return True if this detection is a known false positive to suppress."""
+    if entity_type == "PERSON":
+        # Suppress timestamp patterns
+        for pattern in FALSE_POSITIVE_PATTERNS:
+            if pattern.match(text.strip()):
+                return True
+        # Suppress well-known product names
+        if text.strip().lower() in FALSE_POSITIVE_NAMES:
+            return True
+    return False
+
 
 # --- Core logic --------------------------------------------------------------
 
@@ -46,6 +72,12 @@ def anonymize_text(text: str, analyzer: AnalyzerEngine, anonymizer: AnonymizerEn
     Returns (anonymized_text, pii_log) where pii_log is a list of dicts.
     """
     results = analyzer.analyze(text=text, entities=ENTITIES, language="en")
+
+    # Filter out known false positives (timestamps, product names)
+    results = [
+        r for r in results
+        if not is_false_positive(text[r.start:r.end], r.entity_type)
+    ]
 
     # Sort by position so we can build a replacement map with consistent labels
     results_sorted = sorted(results, key=lambda r: r.start)

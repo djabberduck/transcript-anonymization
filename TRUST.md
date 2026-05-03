@@ -105,11 +105,19 @@ Always run `verify_pii.py` as a second pass.
 
 Both Claude and Presidio occasionally flag things that are not PII:
 - Job titles like "Manager", "Director" at low confidence
-- Product names (e.g., "Notion", "Figma") detected as organisations
 - Common words that happen to match name patterns
 
-In Mode B, the 0.6 confidence threshold in `verify_pii.py` filters likely
-false positives. Review any remaining flags manually before removing them.
+In Mode B, `anonymize.py` now automatically suppresses two common categories
+of false positives before Presidio tags them:
+- **Timestamps** (e.g. `00:05:40`, `1:23`) — common in interview transcripts
+- **Well-known product names** (Gmail, YouTube, Google, Slack, Notion, Figma,
+  Zoom, etc.) when misidentified as PERSON
+
+Product names detected as ORGANIZATION are not filtered — those may be
+legitimate org references depending on context. Review them manually.
+
+In Mode B, the 0.6 confidence threshold in `verify_pii.py` filters remaining
+likely false positives. Review any flags above that threshold manually.
 In Mode A, Claude will generally explain its reasoning — push back if a
 flagged item looks wrong.
 
