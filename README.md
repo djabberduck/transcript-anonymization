@@ -21,7 +21,7 @@ This skill works in two different modes depending on how your team works.
 | Situation | Recommendation |
 |-----------|---------------|
 | Quick personal check, one-off transcript | Skip the skill — just ask Claude directly (see prompt below) |
-| Team-wide process, consistent output needed | Install the skill — it enforces consistent placeholders and a built-in second-pass check |
+| Team-wide process, consistent output needed | Install the skill — it enforces consistent placeholders and standardised output format |
 | Automated pipeline (Cursor / Claude Code) | Use Mode B (Python) — meaningfully stronger than plain Claude.ai |
 | Privacy team sign-off needed | Use Mode B (Python) — JSON audit logs are required evidence |
 
@@ -48,8 +48,13 @@ This prompt gives you most of the benefit without installing anything:
 - Scope is locked — Claude won't over-redact or under-redact
 
 **What the skill does NOT add:**
-- It does not make Claude more accurate — the underlying model is the same
+- It does not make Claude more accurate — the underlying model is the same,
+  and a researcher who includes a second-pass request in their own prompt
+  will get identical detection quality
 - It does not enable Presidio in the browser — that requires Python (Mode B)
+- The "built-in second pass" is Claude re-reading its own output — it is not
+  an independent check, and offers no reliability advantage over asking Claude
+  to do a second pass yourself
 
 ---
 
@@ -130,16 +135,11 @@ reproducible, auditable process with JSON logs.
 
 Two Python scripts run locally on your machine:
 - anonymize.py — uses Microsoft Presidio (rule-based) to detect and replace PII
-- verify_pii.py — uses the Claude API as a second pass to catch contextual
-  PII that Presidio misses
-
-No transcript data is stored outside your machine (except for the second-pass
-Claude API call).
+No transcript data is stored outside your machine.
 
 ### Prerequisites
 
 - Python 3.11+ (on macOS, use Homebrew — avoid system Python 3.9 on Apple Silicon)
-- An Anthropic API key (for verify_pii.py only)
 
 ### One-time setup
 
@@ -147,49 +147,40 @@ Claude API call).
     source .venv/bin/activate
     pip install presidio-analyzer presidio-anonymizer spacy anthropic
     python -m spacy download en_core_web_lg
-    export ANTHROPIC_API_KEY=your_key_here
 
 ### Copy the scripts
 
 Copy both scripts from this skill package into your project root:
 
     cp scripts/anonymize.py your-project/
-    cp scripts/verify_pii.py your-project/
-
+    
 ### Run
 
     # Step 0: Anonymize
-    python anonymize.py "02 - Input/" --output-dir "02-Input-Anonymized/"
+    python anonymize.py "01 - Input/" --output-dir "02 - Output/"
 
-    # Step 0c: Claude second-pass verification
-    python verify_pii.py "02-Input-Anonymized/"
-
-    # To check all files (not just a sample):
-    python verify_pii.py "02-Input-Anonymized/" --all
+    # Step 0b: Check terminal output for PASS/FAIL per file
 
 ### Integrate into a directives file
 
 Add these steps at the top of your directives.md, before any analysis steps:
 
-    STEP 0: Run python anonymize.py "02 - Input/" --output-dir "02-Input-Anonymized/"
+    STEP 0: Run python anonymize.py "01 - Input/" --output-dir "02 - Output/"
     STEP 0b: Check terminal output for PASS/FAIL per file
-    STEP 0c: Run python verify_pii.py "02-Input-Anonymized/"
-    All subsequent steps read from 02-Input-Anonymized/, never from 02 - Input/
+    All subsequent steps read from 02 - Output/, never from 01 - Input/
 
 ### What Mode B produces
 
 For each transcript:
 - Anonymized .txt file in the output folder
 - _pii_log.json — every Presidio substitution with confidence scores
-- claude-pii-reports/claude_pii_check_[timestamp].json — Claude second-pass report
 
-These JSON files together form your audit trail for Privacy team review.
+These files form your audit trail for Privacy team review.
 
 ### Mode B limitations
 
 - Requires Python setup (one-time effort)
-- Presidio misses contextual and indirect PII — that is why verify_pii.py is essential
-- verify_pii.py sends transcript content to the Anthropic API
+- Presidio misses contextual and indirect PII — see TRUST.md for details
 - See TRUST.md for full breakdown of what each tool can and cannot detect
 
 ---
@@ -228,7 +219,6 @@ transcripts may have been partially pre-anonymized by the research platform.
     ├── TRUST.md          ← reliability details and what to verify manually
     └── scripts/
         ├── anonymize.py  ← Presidio-based anonymization script (Mode B only)
-        └── verify_pii.py ← Claude API second-pass verification (Mode B only)
 
 ---
 
