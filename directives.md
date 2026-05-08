@@ -48,59 +48,7 @@ python -m spacy download en_core_web_lg
 
 ---
 
-### STEP 0b: Verify Anonymization (Presidio)
-
-Spot-check a sample of the anonymized files before finishing. This step is a gate — report failure clearly if the check does not pass.
-
-**What you do:**
-
-1. Count the total number of `.txt` files in `02-Input-Anonymized/`
-2. Select a sample: 3 files, or all files if there are fewer than 3
-3. For each sampled file, run Presidio's analyzer directly (no replacement) to scan for any remaining PII:
-
-```python
-from presidio_analyzer import AnalyzerEngine
-from pathlib import Path
-
-analyzer = AnalyzerEngine()
-ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "ORGANIZATION"]
-sample_dir = Path("02-Input-Anonymized/")
-
-files = sorted(f for f in sample_dir.glob("*.txt") if "_pii_log" not in f.name)
-sample = files[:3]
-
-for f in sample:
-    text = f.read_text(encoding="utf-8")
-    results = analyzer.analyze(text=text, entities=ENTITIES, language="en")
-    hits = [r for r in results if r.score >= 0.6]
-    if hits:
-        print(f"FAIL: {f.name} — {len(hits)} potential PII hit(s) remaining")
-        for r in hits:
-            print(f"  [{r.entity_type}] score={r.score:.2f} → '{text[r.start:r.end]}'")
-    else:
-        print(f"PASS: {f.name} — no PII detected above threshold")
-```
-
-**What this produces:**
-
-A printed verification report in the terminal. No files are written.
-
-**How to interpret results:**
-
-- `PASS` on all sampled files → proceed to Step 0c
-- `FAIL` on any file → stop. Review the flagged hits:
-  - If the hit is a false positive (score below 0.6 or a common word misidentified as a name), note it and proceed with a comment
-  - If the hit is real PII that was missed, re-run `anonymize.py` on the affected file(s) and re-verify before continuing
-
-**Rules:**
-- Sample selection should cover a spread of file sizes — don't only check the smallest files
-- A Presidio score below 0.6 is likely a false positive — use judgment, but flag it
-- Do not modify files in this step — this is read-only verification only
-- Report the outcome clearly: files checked, pass/fail status, any false positives noted
-
----
-
-### STEP 0c: Second-Pass Verification (Local LLM)
+### STEP 0b: Second-Pass Verification (Local LLM)
 
 Run a contextual PII check using a local LLM to catch what Presidio's rule-based
 approach cannot detect. Requires LM Studio to be running with a model loaded.
@@ -125,7 +73,7 @@ python verify_pii.py "02-Input-Anonymized/" --all
 
 - `✅ PASS` on all sampled files → anonymization complete, transcripts are ready for analysis
 - `❌ ISSUES FOUND` → stop. Review the flagged text, apply replacements manually in the
-  anonymized files, then re-run Steps 0b and 0c before proceeding
+  anonymized files, then re-run Steps 0 and 0b before proceeding
 - `⚠️ ERROR` → check that LM Studio is running and the server is started
 
 **Rules:**

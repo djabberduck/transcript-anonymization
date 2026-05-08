@@ -14,17 +14,16 @@ description: >
 # Transcript Anonymization Skill
 
 This skill prepares raw interview transcripts for safe analysis by detecting
-and replacing PII before any human or AI reads the content. It runs in three
-phases: anonymization (Step 0), Presidio-based verification (Step 0b), and
-local LLM verification (Step 0c). All processing is local — no transcript
-data is sent to any external service.
+and replacing PII before any human or AI reads the content. It runs in two
+phases: Presidio anonymization (Step 0) and local LLM verification (Step 0b).
+All processing is local — no transcript data is sent to any external service.
 
 ---
 
 ## Python pipeline (local machine or Cowork)
 
 Runs Microsoft Presidio locally for anonymization, then a local LLM via
-LM Studio for contextual second-pass verification. No data leaves the machine.
+LM Studio for contextual verification. No data leaves the machine.
 
 ### Dependencies
 
@@ -49,12 +48,12 @@ cp scripts/anonymize.py your-project/
 cp scripts/verify_pii.py your-project/
 ```
 
-### LM Studio setup (for Step 0c)
+### LM Studio setup (for Step 0b)
 
 1. Download and install LM Studio
-2. In the Discover tab, download `Qwen2.5-32B-Instruct-GGUF` (Q4_K_M)
+2. In the Discover tab, download `Qwen2.5-32B-Instruct-GGUF` (Q4_K_M, ~20GB)
 3. In the Developer tab, load the model and click Start Server
-4. Keep the server running while using the pipeline
+4. Keep the server running while running the pipeline
 
 ---
 
@@ -85,51 +84,7 @@ For each `.txt` transcript in the input folder:
 
 ---
 
-### Step 0b: Verify anonymization (Presidio)
-
-Run this Python snippet from your project root (or ask Claude to run it):
-
-```python
-from presidio_analyzer import AnalyzerEngine
-from pathlib import Path
-
-analyzer = AnalyzerEngine()
-ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "ORGANIZATION"]
-sample_dir = Path("02-Input-Anonymized/")  # update path if different
-
-files = sorted(f for f in sample_dir.glob("*.txt") if "_pii_log" not in f.name)
-sample = files[:3]  # spot-check 3 files; check all if fewer than 3
-
-for f in sample:
-    text = f.read_text(encoding="utf-8")
-    results = analyzer.analyze(text=text, entities=ENTITIES, language="en")
-    hits = [r for r in results if r.score >= 0.6]
-    if hits:
-        print(f"FAIL: {f.name} — {len(hits)} potential PII hit(s) remaining")
-        for r in hits:
-            print(f"  [{r.entity_type}] score={r.score:.2f} → '{text[r.start:r.end]}'")
-    else:
-        print(f"PASS: {f.name} — no PII detected above threshold")
-```
-
-**How to interpret results**
-
-| Result | Action |
-|--------|--------|
-| PASS on all sampled files | Proceed to Step 0c |
-| FAIL — hit score < 0.6 | Likely false positive. Note it, proceed with caution |
-| FAIL — hit score ≥ 0.6 | Real PII missed. Re-run `anonymize.py` on that file, then re-verify |
-
-**Rules**
-
-- Sample should cover a spread of file sizes — don't only check the smallest
-- Score threshold of 0.6 filters likely false positives
-- This step is read-only — do not modify any files here
-- Record outcome in your run log before proceeding to Step 0c
-
----
-
-### Step 0c: Second-pass verification (local LLM)
+### Step 0b: Second-pass verification (local LLM)
 
 Checks anonymized transcripts for contextual and indirect PII that Presidio's
 rule-based approach cannot detect. Runs entirely locally via LM Studio.
@@ -158,7 +113,7 @@ Beyond Presidio's structural detection, the local LLM looks for:
 | Result | Action |
 |--------|--------|
 | ✅ All files PASS | Proceed to analysis |
-| ❌ Issues found | Review flagged text. Apply replacements manually, then re-run Steps 0b and 0c |
+| ❌ Issues found | Review flagged text. Apply replacements manually, then re-run Steps 0 and 0b |
 | ⚠️ Error | Check LM Studio server is running |
 
 **Rules**
@@ -167,7 +122,7 @@ Beyond Presidio's structural detection, the local LLM looks for:
   sharing transcripts externally
 - JSON reports are saved to `02-Input-Anonymized/local-llm-pii-reports/`
 - If issues are found, fix them manually in the anonymized files and re-run
-  both 0b and 0c before proceeding
+  both steps before proceeding
 
 ---
 

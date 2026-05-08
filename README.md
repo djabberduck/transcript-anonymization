@@ -20,7 +20,7 @@ or LLM.
 |-----------|---------------|
 | Team-wide process, consistent output needed | Use this skill — enforces consistent placeholders and standardised output |
 | Automated pipeline (Cursor / Claude Code) | Use this skill — reproducible, auditable, JSON logs included |
-| Privacy team sign-off needed | Use this skill — JSON audit logs from all three steps are required evidence |
+| Privacy team sign-off needed | Use this skill — JSON audit logs from both steps are required evidence |
 
 ---
 
@@ -28,9 +28,9 @@ or LLM.
 
 Two tools run in sequence, covering each other's blind spots:
 
-- **Presidio** (Steps 0 + 0b) — rule-based, fast, deterministic. Strong on
-  structured PII: emails, phone numbers, formal names, large company names.
-- **Local LLM via LM Studio** (Step 0c) — contextual, catches what Presidio
+- **Presidio** (Step 0) — rule-based, fast, deterministic. Strong on structured
+  PII: emails, phone numbers, formal names, large company names.
+- **Local LLM via LM Studio** (Step 0b) — contextual, catches what Presidio
   misses: informal name references, indirect identifiers, non-Western names.
 
 Neither tool sends data off your machine.
@@ -51,7 +51,7 @@ python -m spacy download en_core_web_lg
 > Use Python 3.11+. On macOS with Apple Silicon (M1/M2/M3/M4), use Python 3.11
 > via Homebrew to avoid numpy/OpenBLAS crashes with the system Python 3.9.
 
-### LM Studio (for Step 0c)
+### LM Studio (for Step 0b)
 
 1. Download and install LM Studio
 2. In the Discover tab, download `Qwen2.5-32B-Instruct-GGUF` (Q4_K_M, ~20GB)
@@ -77,12 +77,7 @@ cp scripts/verify_pii.py your-project/
 python anonymize.py "02 - Input/" --output-dir "02-Input-Anonymized/"
 ```
 
-### Step 0b: Presidio verification
-
-Run the verification snippet from SKILL.md (or ask Claude to run it). Check
-for PASS/FAIL per file. Do not proceed to Step 0c if any file fails.
-
-### Step 0c: Local LLM verification
+### Step 0b: Local LLM verification
 
 ```bash
 python verify_pii.py "02-Input-Anonymized/"
@@ -98,8 +93,7 @@ Add these steps at the top of your `directives.md`, before any analysis steps:
 
 ```
 STEP 0:  Run python anonymize.py "02 - Input/" --output-dir "02-Input-Anonymized/"
-STEP 0b: Run the Presidio verification snippet from SKILL.md. Do not proceed if any file fails.
-STEP 0c: Run python verify_pii.py "02-Input-Anonymized/". Do not proceed if any file fails.
+STEP 0b: Run python verify_pii.py "02-Input-Anonymized/". Do not proceed if any file fails.
 All subsequent steps must read from 02-Input-Anonymized/, never from 02 - Input/
 ```
 
@@ -120,7 +114,7 @@ These files form your audit trail for Privacy team review.
 ## Limitations
 
 - Presidio is less reliable on informal name references, non-Western names,
-  and indirect identifiers — this is what Step 0c is designed to catch
+  and indirect identifiers — this is what Step 0b is designed to catch
 - The local LLM checks 30,000 characters per transcript by default. Very long
   transcripts beyond that limit will be flagged as truncated in the report
 - See TRUST.md for a full breakdown and recommended manual spot-checks
@@ -146,7 +140,7 @@ different anonymized entities.
 
 What was tested: The skill was validated on 6 English-language user research
 transcripts. Presidio correctly returned empty PII logs on pre-anonymized
-transcripts, and the verification gate passed on all sampled files.
+transcripts, and the LLM verification passed on all sampled files.
 
 Validation limitations: small sample, English only, structured interview
 format, transcripts may have been partially pre-anonymized by the research

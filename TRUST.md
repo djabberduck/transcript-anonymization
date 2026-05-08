@@ -10,7 +10,7 @@ Manual spot-checks (listed below) remain a required part of the process.
 
 ---
 
-## What Presidio does well (Steps 0 + 0b)
+## What Presidio does well (Step 0)
 
 | Entity type | Reliability | Notes |
 |-------------|-------------|-------|
@@ -21,7 +21,7 @@ Manual spot-checks (listed below) remain a required part of the process.
 
 ---
 
-## Where Presidio struggles — what the local LLM covers (Step 0c)
+## Where Presidio struggles — what the local LLM covers (Step 0b)
 
 - **Unusual or non-Western names** — trained predominantly on Western name
   patterns. Arabic, East Asian, South Asian names may be missed
@@ -33,30 +33,21 @@ Manual spot-checks (listed below) remain a required part of the process.
 - **Indirect identifiers** — role + location + industry combinations not detected
 - **Social handles, unique event references** — not in Presidio's entity set
 
-Step 0c specifically prompts the local LLM to look for all of the above.
+Step 0b specifically prompts the local LLM to look for all of the above.
 Together the two tools cover each other's blind spots.
 
 ---
 
-## What the local LLM adds (Step 0c)
-
-The `verify_pii.py` script prompts the model to look for what Presidio misses:
-casual name references, indirect identifiers, named third parties, and unique
-identifying details.
+## What the local LLM adds (Step 0b)
 
 | Detection type | Handled by |
 |---------------|-----------|
-| Emails, phones | Presidio (Steps 0 + 0b) |
-| Formal full names, large orgs | Presidio (Steps 0 + 0b) |
-| Informal name references | Local LLM (Step 0c) |
-| Non-Western names | Local LLM (Step 0c) |
-| Indirect identifiers | Local LLM (Step 0c) |
-| Unique personal references | Local LLM (Step 0c) |
-
-Note: Step 0b uses the same Presidio engine as Step 0, so it primarily serves
-as a pipeline integrity check (confirming files were written and processed
-correctly) rather than catching new missed PII. The local LLM in Step 0c
-is the substantive second-pass check.
+| Emails, phones | Presidio (Step 0) |
+| Formal full names, large orgs | Presidio (Step 0) |
+| Informal name references | Local LLM (Step 0b) |
+| Non-Western names | Local LLM (Step 0b) |
+| Indirect identifiers | Local LLM (Step 0b) |
+| Unique personal references | Local LLM (Step 0b) |
 
 ---
 
@@ -92,13 +83,13 @@ It does not tell you:
 - ❌ Whether indirect identifiers are present
 
 An empty log means Presidio found nothing — not that there is nothing to find.
-Always run Steps 0b and 0c before treating transcripts as clean.
+Always run Step 0b before treating transcripts as clean.
 
 ---
 
 ## Recommended manual checks before sharing externally
 
-Regardless of Step 0c results, do these checks before sharing transcripts
+Regardless of Step 0b results, do these checks before sharing transcripts
 outside your immediate team:
 
 1. **Read the first and last 200 words of each transcript** — participants
@@ -119,11 +110,11 @@ outside your immediate team:
 
 | Use case | Confidence | Recommendation |
 |----------|------------|----------------|
-| Internal team analysis | ✅ High | Run Steps 0–0c, do manual spot-check |
+| Internal team analysis | ✅ High | Run Steps 0 + 0b, do manual spot-check |
 | Automated pipeline (Cursor/Code) | ✅ High | Best for reproducible workflows with full JSON audit trail |
 | Sharing with external partners | ✅ High | Manual review of flagged items required |
 | Publishing quotes in reports | ⚠️ Medium-High | Human eyes on every quote that appears publicly |
-| Privacy team approval / audit trail | ✅ High | JSON logs from all three steps serve as audit evidence |
+| Privacy team approval / audit trail | ✅ High | JSON logs from both steps serve as audit evidence |
 | Regulatory/legal compliance (GDPR, HIPAA) | ❌ Not sufficient alone | This tool does not constitute compliant anonymization under law — DPO review required |
 
 ---
@@ -131,8 +122,8 @@ outside your immediate team:
 ## How this was validated
 
 Tested on 6 English-language user research transcripts. Presidio correctly
-returned empty PII logs on pre-anonymized transcripts, and verification passed
-on all sampled files.
+returned empty PII logs on pre-anonymized transcripts, and LLM verification
+passed on all sampled files.
 
 **Validation limitations:**
 - Small sample size (6 transcripts)
