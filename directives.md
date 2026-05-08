@@ -40,13 +40,15 @@ python scripts/anonymize.py 02-Input/ --output-dir 02-Input-Anonymized/
 
 **Dependencies (install once before running):**
 ```bash
-pip install presidio-analyzer presidio-anonymizer spacy --break-system-packages
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install presidio-analyzer presidio-anonymizer spacy openai
 python -m spacy download en_core_web_lg
 ```
 
 ---
 
-### STEP 0b: Verify Anonymization
+### STEP 0b: Verify Anonymization (Presidio)
 
 Spot-check a sample of the anonymized files before finishing. This step is a gate — report failure clearly if the check does not pass.
 
@@ -85,13 +87,48 @@ A printed verification report in the terminal. No files are written.
 
 **How to interpret results:**
 
-- `PASS` on all sampled files → anonymization complete, transcripts are ready for analysis
+- `PASS` on all sampled files → proceed to Step 0c
 - `FAIL` on any file → stop. Review the flagged hits:
   - If the hit is a false positive (score below 0.6 or a common word misidentified as a name), note it and proceed with a comment
-  - If the hit is real PII that was missed, re-run `anonymize.py` on the affected file(s) and re-verify before finishing
+  - If the hit is real PII that was missed, re-run `anonymize.py` on the affected file(s) and re-verify before continuing
 
 **Rules:**
 - Sample selection should cover a spread of file sizes — don't only check the smallest files
 - A Presidio score below 0.6 is likely a false positive — use judgment, but flag it
 - Do not modify files in this step — this is read-only verification only
 - Report the outcome clearly: files checked, pass/fail status, any false positives noted
+
+---
+
+### STEP 0c: Second-Pass Verification (Local LLM)
+
+Run a contextual PII check using a local LLM to catch what Presidio's rule-based
+approach cannot detect. Requires LM Studio to be running with a model loaded.
+
+**What you do:**
+
+```bash
+python verify_pii.py "02-Input-Anonymized/"
+```
+
+To check all files instead of a sample:
+```bash
+python verify_pii.py "02-Input-Anonymized/" --all
+```
+
+**What this produces:**
+
+- Terminal output with PASS/FAIL per file and details of any issues found
+- A timestamped JSON report saved to `02-Input-Anonymized/local-llm-pii-reports/`
+
+**How to interpret results:**
+
+- `✅ PASS` on all sampled files → anonymization complete, transcripts are ready for analysis
+- `❌ ISSUES FOUND` → stop. Review the flagged text, apply replacements manually in the
+  anonymized files, then re-run Steps 0b and 0c before proceeding
+- `⚠️ ERROR` → check that LM Studio is running and the server is started
+
+**Rules:**
+- Do not proceed to analysis if any file fails
+- Suppressed false positives (e.g. "DuckDuckGo") are logged but do not count as failures
+- Record the outcome and retain the JSON report as part of your audit trail
