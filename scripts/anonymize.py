@@ -35,6 +35,9 @@ PLACEHOLDER_MAP = {
 # Covers: HH:MM:SS and HH:MM timestamps common in interview transcripts
 FALSE_POSITIVE_PATTERNS = [
     re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$"),  # timestamps: 00:05:40, 1:23, 01:23:45
+    re.compile(
+        r"^\d{1,2}:\d{2}(:\d{2})?\s*-\s*\d{1,2}:\d{2}(:\d{2})?$"
+    ),  # ranges: 00:00:14 - 00:00:19
 ]
 
 # Well-known product/brand names Presidio misidentifies as PERSON
@@ -42,6 +45,8 @@ FALSE_POSITIVE_NAMES = {
     "gmail", "youtube", "google", "safari", "chrome", "firefox",
     "netflix", "spotify", "slack", "notion", "figma", "zoom",
     "instagram", "facebook", "twitter", "tiktok", "linkedin",
+    "mac", "linux", "mint", "bing", "mhmm", "claude", "gorgias",
+    "roku", "pocket",
 }
 
 
@@ -56,6 +61,24 @@ def is_false_positive(text: str, entity_type: str) -> bool:
         if text.strip().lower() in FALSE_POSITIVE_NAMES:
             return True
     return False
+
+
+def read_transcript_text(path: Path) -> str:
+    """Read a transcript: UTF-8 first, then MacRoman / ISO-8859-1 fallbacks."""
+    raw = path.read_bytes()
+    for encoding in ("utf-8-sig", "utf-8"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    # Stray MacRoman bytes (e.g. 0xD5 for a right single quote) break UTF-8;
+    # try before ISO-8859-1 so "we've" stays correct.
+    for encoding in ("mac_roman", "iso-8859-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 # --- Core logic --------------------------------------------------------------
@@ -127,7 +150,25 @@ def anonymize_text(text: str, analyzer: AnalyzerEngine, anonymizer: AnonymizerEn
         label = value_to_label.get(key, f"[{result.entity_type}]")
         anonymized_text = anonymized_text[:result.start] + label + anonymized_text[result.end:]
 
+    # Presidio often misses fragmented repeats (e.g. speaker names split across lines).
+    # Apply every logged literal globally, longest-first, so leftovers match the same tags.
+    anonymized_text = apply_logged_string_replacements(anonymized_text, pii_log)
+
     return anonymized_text, pii_log
+
+
+def apply_logged_string_replacements(text: str, pii_log: list[dict]) -> str:
+    """Replace any remaining occurrences of each logged original with its placeholder."""
+    entries = sorted(pii_log, key=lambda item: len(item["original"]), reverse=True)
+    out = text
+    for item in entries:
+        original = item["original"]
+        label = item["replacement"]
+        if not original.strip():
+            continue
+        pat = re.compile(re.escape(original), re.IGNORECASE)
+        out = pat.sub(label, out)
+    return out
 
 
 def process_file(input_path: Path, output_dir: Path, log: bool = True):
@@ -142,7 +183,7 @@ def process_file(input_path: Path, output_dir: Path, log: bool = True):
         print(f"ERROR: Only .txt files are supported. Got: {input_path.suffix}")
         sys.exit(1)
 
-    text = input_path.read_text(encoding="utf-8")
+    text = read_transcript_text(input_path)
 
     print(f"Analyzing: {input_path.name} ({len(text)} chars)")
 
@@ -178,7 +219,11 @@ def process_directory(input_dir: Path, output_dir: Path, log: bool = True):
     """
     Anonymize all .txt files in a directory.
     """
-    txt_files = list(input_dir.glob("*.txt"))
+    txt_files = sorted(
+        f
+        for f in input_dir.glob("*.txt")
+        if not f.name.startswith("~$")
+    )
     if not txt_files:
         print(f"No .txt files found in {input_dir}")
         return

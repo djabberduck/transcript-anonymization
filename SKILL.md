@@ -7,112 +7,23 @@ description: >
   participant identity, preparing transcripts for analysis, or running
   anonymization before qualitative coding. Also use when a directives file
   or research pipeline includes a Step 0 or pre-processing phase involving
-  transcript files. Works with .txt files. Use Path A when running in
-  Claude.ai or Cowork; use Path B when running locally via a Python environment.
+  transcript files. Works with .txt files. Uses Microsoft Presidio locally —
+  no data leaves the machine. Does not use any external LLM on transcript data.
 ---
 
 # Transcript Anonymization Skill
 
 This skill prepares raw interview transcripts for safe analysis by detecting
-and replacing PII before any human or AI reads the content.
+and replacing PII before any human or AI reads the content. It runs in two
+phases: anonymization (Step 0) and Presidio-based verification (Step 0b).
+All processing is local — no transcript data is sent to any external service.
 
 ---
 
-## Which path do you need?
+## Python pipeline (local machine or Cowork)
 
-**Path A — Claude.ai or Cowork (no setup, one-off transcripts)**
-Upload the transcript and ask Claude to anonymize it. No Python, no
-dependencies. Use this for individual transcripts or when a formal audit
-trail is not required.
-
-**Path B — Python pipeline (local machine, team-wide or audit-grade)**
-For consistent output across a team, Privacy team sign-off, or a formal
-audit trail. Uses Microsoft Presidio locally — no data leaves the machine.
-Does not work in Cowork. Setup instructions below.
-
----
-
-## Path A: Anonymize in Claude.ai or Cowork
-
-### What Claude does
-
-1. Reads the uploaded transcript
-2. Replaces all PII with consistent, numbered placeholders (same name always
-   gets the same tag throughout the file)
-3. Runs a second pass to catch anything missed in the first pass
-4. Returns the anonymized transcript and a substitution log
-
-### PII entities detected and replaced
-
-| Entity type      | Placeholder format          |
-|------------------|-----------------------------|
-| Person names     | `[PERSON_1]`, `[PERSON_2]`  |
-| Organizations    | `[COMPANY_1]`, `[COMPANY_2]`|
-| Email addresses  | `[EMAIL_1]`, `[EMAIL_2]`    |
-| Phone numbers    | `[PHONE_1]`, `[PHONE_2]`    |
-
-Placeholders are consistent within each transcript — the same name always
-gets the same tag throughout a file.
-
-### Instructions for Claude (Path A)
-
-When this skill is triggered, Claude must follow these steps exactly:
-
-**Pass 1 — Anonymize**
-
-Read the transcript and replace all PII with consistent, numbered placeholders:
-- Person names → `[PERSON_1]`, `[PERSON_2]`, etc. (same name = same tag throughout)
-- Company and organisation names → `[COMPANY_1]`, `[COMPANY_2]`, etc.
-- Email addresses → `[EMAIL_1]`, `[EMAIL_2]`, etc.
-- Phone numbers → `[PHONE_1]`, `[PHONE_2]`, etc.
-
-**Pass 2 — Verify**
-
-Re-read the anonymized output and check specifically for:
-- First names used alone — "I asked Sarah to review it"
-- Names after relationship words — "my manager Dave", "my colleague Tom"
-- Names in possessives — "John's team", "Maria's approach"
-- Indirect identifiers — role + location + industry combinations that could
-  re-identify a participant even without a name
-- Unique references — "after my TEDx talk", internal project codenames
-- Named third parties mentioned in passing that were missed in Pass 1
-
-Apply any additional replacements found in Pass 2.
-
-**Output**
-
-Return two things:
-1. The fully anonymized transcript
-2. A substitution log listing every replacement made, in this format:
-
-```
-SUBSTITUTION LOG
-----------------
-[PERSON_1] = original name (N occurrences)
-[PERSON_2] = original name (N occurrences)
-[COMPANY_1] = original name (N occurrences)
-...
-Pass 2 additions: [list any additional replacements found, or "none"]
-```
-
-### How to trigger
-
-Upload the transcript file and say:
-> "Anonymize this transcript using the skill."
-
-### Rules
-
-- Review the substitution log before proceeding to analysis
-- Raw originals are never modified — Claude works from the uploaded copy
-- For Privacy team sign-off or formal audit trails, use Path B instead
-
----
-
-## Path B: Python pipeline (local machine only)
-
-This path runs Microsoft Presidio locally for team-wide or audit-grade
-anonymization. No data leaves the machine. **Does not work in Cowork** —
-use Path A there instead.
+Runs Microsoft Presidio locally for team-wide or audit-grade anonymization.
+No data leaves the machine.
 
 ### Dependencies
 
@@ -200,50 +111,6 @@ for f in sample:
   as names). Use judgment for borderline cases
 - This step is read-only — do not modify any files here
 - Record outcome in your run log before proceeding to analysis
-
-### Step 0c: Second-pass verification using Claude API
-
-This step sends each anonymized transcript to Claude to catch contextual and
-indirect PII that Presidio's rule-based approach cannot detect.
-
-```bash
-pip install anthropic   # one-time install
-python verify_pii.py <anonymized-folder>/
-```
-
-**To check all files (not just a sample):**
-```bash
-python verify_pii.py "02-Input-Anonymized/" --all
-```
-
-**What it checks for**
-
-Beyond Presidio's structural detection, Claude looks for:
-- First names used alone — "I asked Sarah to review it"
-- Names after relationship words — "my manager Dave", "my colleague Tom"
-- Names in possessives — "John's team", "Maria's approach"
-- Indirect identifiers — role + location + industry combinations that
-  could re-identify a participant even without a name
-- Unique references — "after my TEDx talk", internal project codenames
-- Named third parties — colleagues, clients, or competitors mentioned
-  in passing that Presidio missed
-
-**How to interpret results**
-
-| Result | Action |
-|--------|--------|
-| ✅ All files PASS | Proceed to analysis |
-| ❌ Issues found | Review flagged text. Apply suggested replacements manually, then re-run |
-| ⚠️ API error | Check your `ANTHROPIC_API_KEY` environment variable is set |
-
-**Rules**
-
-- This step checks a sample of 3 files by default. Use `--all` for full
-  coverage before sharing transcripts externally
-- If issues are found, fix them manually in the anonymized files and re-run
-  Steps 0b and 0c before proceeding
-- The JSON report should be saved alongside your PII logs as part of your
-  audit trail for Privacy team review
 
 ### Folder structure
 
