@@ -5,9 +5,9 @@
 A reusable skill for stripping PII (personally identifiable information) from
 user research interview transcripts before any analysis begins.
 
-PII replaced: person names, company/org names, email addresses, phone numbers.
-Each is replaced with a consistent, readable placeholder (`[PERSON_1]`,
-`[COMPANY_1]`, `[EMAIL_1]`, `[PHONE_1]`).
+PII replaced: person names, company/org names, email addresses, phone numbers,
+locations. Each is replaced with a consistent, readable placeholder
+(`[PERSON_1]`, `[COMPANY_1]`, `[EMAIL_1]`, `[PHONE_1]`, `[LOCATION_1]`).
 
 All processing runs locally. No transcript data is sent to any external service
 or LLM.
@@ -29,7 +29,7 @@ or LLM.
 Two tools run in sequence, covering each other's blind spots:
 
 - **Presidio** (Step 0) — rule-based, fast, deterministic. Strong on structured
-  PII: emails, phone numbers, formal names, large company names.
+  PII: emails, phone numbers, locations, formal names, large company names.
 - **Local LLM via LM Studio** (Step 0b) — contextual, catches what Presidio
   misses: informal name references, indirect identifiers, non-Western names.
 
@@ -77,13 +77,28 @@ cp scripts/verify_pii.py your-project/
 python anonymize.py "02 - Input/" --output-dir "02-Input-Anonymized/"
 ```
 
+This produces for each transcript:
+- An anonymized `.txt` file
+- A `_pii_log.json` recording every substitution made
+- A `_suppressed_log.json` recording detections intentionally skipped as false
+  positives — review this to confirm no real participant names were suppressed
+
 ### Step 0b: Local LLM verification
 
 ```bash
 python verify_pii.py "02-Input-Anonymized/"
 ```
 
-Use `--all` to check every file instead of a 3-file sample.
+Use `--all` to check every file instead of a 3-file sample (recommended before
+sharing transcripts externally).
+
+Long transcripts are automatically split into overlapping chunks so the full
+transcript is covered regardless of length. Use `--chunk-size` to adjust the
+chunk size if needed:
+
+```bash
+python verify_pii.py "02-Input-Anonymized/" --all --chunk-size 20000
+```
 
 ---
 
@@ -93,7 +108,9 @@ Add these steps at the top of your `directives.md`, before any analysis steps:
 
 ```
 STEP 0:  Run python anonymize.py "02 - Input/" --output-dir "02-Input-Anonymized/"
-STEP 0b: Run python verify_pii.py "02-Input-Anonymized/". Do not proceed if any file fails.
+         Review _suppressed_log.json for any real names incorrectly suppressed.
+STEP 0b: Run python verify_pii.py "02-Input-Anonymized/" --all
+         Do not proceed if any file fails or has unresolved errors.
 All subsequent steps must read from 02-Input-Anonymized/, never from 02 - Input/
 ```
 
@@ -103,9 +120,13 @@ All subsequent steps must read from 02-Input-Anonymized/, never from 02 - Input/
 
 For each transcript:
 - **Anonymized `.txt` file** in the output folder
-- **`_pii_log.json`** — every Presidio substitution with confidence scores
-- **`local-llm-pii-reports/local_llm_pii_check_<timestamp>.json`** — LLM
-  verification report
+- **`_pii_log_{timestamp}.json`** — every Presidio substitution with confidence scores
+- **`_suppressed_log_{timestamp}.json`** — every detection suppressed as a false
+  positive, with entity type, score, and reason
+
+For the verification pass:
+- **`local-llm-pii-reports/local_llm_pii_check_{timestamp}.json`** — LLM
+  verification report including per-chunk results for long transcripts
 
 These files form your audit trail for Privacy team review.
 
@@ -115,9 +136,28 @@ These files form your audit trail for Privacy team review.
 
 - Presidio is less reliable on informal name references, non-Western names,
   and indirect identifiers — this is what Step 0b is designed to catch
-- The local LLM checks 30,000 characters per transcript by default. Very long
-  transcripts beyond that limit will be flagged as truncated in the report
+- The `FALSE_POSITIVE_NAMES` suppression list in `anonymize.py` may silence
+  a real participant name that happens to match a product name (e.g. "Mac",
+  "Mint"). Review `_suppressed_log.json` after each run
+- The local LLM (Qwen2.5-32B) performs well on explicit and contextual PII
+  but quasi-identifier detection (indirect re-identification risk) is
+  prompt-sensitive and not infallible — manual spot-checks remain necessary
 - See TRUST.md for a full breakdown and recommended manual spot-checks
+
+---
+
+## Changelog
+
+### v2 (current)
+- `anonymize.py`: Added `LOCATION` entity type; explicit `MIN_SCORE` threshold;
+  suppressed detections now written to `_suppressed_log.json` for audit
+- `verify_pii.py`: Replaced hard 30k char truncation with overlapping chunking
+  (28k chunk / 2k overlap) for full transcript coverage; raised `max_tokens`
+  from 1000 to 2500; restructured system prompt for local model compatibility;
+  added `temperature=0.1` for consistent Qwen output; `--chunk-size` CLI flag
+
+### v1
+- Initial release with Presidio + local LLM two-pass pipeline
 
 ---
 

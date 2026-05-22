@@ -18,6 +18,7 @@ Manual spot-checks (listed below) remain a required part of the process.
 | Phone numbers | ✅ High | Rule-based; near-perfect |
 | Common Western full names | ✅ Good | "John Smith"-style names reliably caught |
 | Large company names | ✅ Good | Google, Microsoft, Apple etc. reliably caught |
+| Locations (addresses, cities) | ✅ Good | Added in v2; catches explicit addresses and place names |
 
 ---
 
@@ -41,9 +42,10 @@ Together the two tools cover each other's blind spots.
 ## What the local LLM adds (Step 0b)
 
 | Detection type | Handled by |
-|---------------|-----------|
+|----------------|-----------|
 | Emails, phones | Presidio (Step 0) |
 | Formal full names, large orgs | Presidio (Step 0) |
+| Locations (addresses, place names) | Presidio (Step 0) |
 | Informal name references | Local LLM (Step 0b) |
 | Non-Western names | Local LLM (Step 0b) |
 | Indirect identifiers | Local LLM (Step 0b) |
@@ -60,14 +62,23 @@ Both Presidio and the local LLM occasionally flag things that are not PII.
 - **Well-known product names** (Gmail, YouTube, Slack, Zoom, etc.) when
   misidentified as PERSON
 
+⚠️ **Important:** Any participant whose first name matches an entry in the
+`FALSE_POSITIVE_NAMES` list (e.g. "Mac", "Mint") will have their name
+suppressed by Presidio. Review this list before each study if your participant
+pool includes names that could overlap with product names.
+
+All suppressed detections are now written to a `_suppressed_log_{timestamp}.json`
+file alongside the `_pii_log`. The terminal output will flag any suppressions
+and prompt you to review them. An empty suppressed log means nothing was
+intentionally skipped.
+
 **Local LLM:** `verify_pii.py` suppresses known false positives for DDG
 research transcripts:
 - **"DuckDuckGo"**, **"DDG"**, **"Duck Duck Go"** — flagged as org context
   but expected and non-identifying in DDG's own research
 
-Any suppressed items are logged in the terminal output and JSON report for
-transparency. To add additional suppressions, update the `SUPPRESSED_TEXTS`
-set in `verify_pii.py`.
+Suppressed items are logged in the terminal output and JSON report. To add
+additional suppressions, update the `SUPPRESSED_TEXTS` set in `verify_pii.py`.
 
 ---
 
@@ -77,13 +88,36 @@ The `_pii_log.json` file records every Presidio substitution:
 - ✅ What was found and replaced
 - ✅ Entity type and confidence score
 
-It does not tell you:
+The `_suppressed_log.json` file records every detection that was intentionally
+skipped as a false positive:
+- ✅ Original text, entity type, confidence score
+- ✅ Reason for suppression (timestamp pattern or false_positive_names_list)
+
+Neither log tells you:
 - ❌ What Presidio looked at and decided was NOT PII
 - ❌ Whether anything was missed
 - ❌ Whether indirect identifiers are present
 
-An empty log means Presidio found nothing — not that there is nothing to find.
-Always run Step 0b before treating transcripts as clean.
+An empty `_pii_log.json` means Presidio found nothing — not that there is
+nothing to find. Always run Step 0b before treating transcripts as clean.
+Review `_suppressed_log.json` to confirm suppressed items are genuinely
+false positives.
+
+---
+
+## Transcript length and chunking (Step 0b)
+
+Previous versions of `verify_pii.py` truncated transcripts at 30,000 characters,
+meaning the second half of most hour-long interviews was silently skipped.
+
+**v2 uses overlapping chunks.** Transcripts longer than 28,000 characters are
+split into chunks with a 2,000 character overlap. Each chunk is checked
+independently, results are merged, and duplicates from the overlap zone are
+removed. An hour-long transcript (typically 60,000–80,000 characters) is now
+fully covered.
+
+The chunk size can be adjusted via the `--chunk-size` flag if your model's
+context window requires a smaller value.
 
 ---
 
@@ -103,6 +137,8 @@ outside your immediate team:
    competitors, or clients in passing
 6. **Scan for non-Western names** — the local LLM is better than Presidio
    here but not infallible; read carefully if your participant pool is diverse
+7. **Review the suppressed log** — check `_suppressed_log.json` for any
+   real names that were caught by Presidio but then suppressed as false positives
 
 ---
 
@@ -111,7 +147,7 @@ outside your immediate team:
 | Use case | Confidence | Recommendation |
 |----------|------------|----------------|
 | Internal team analysis | ✅ High | Run Steps 0 + 0b, do manual spot-check |
-| Automated pipeline (Cursor/Code) | ✅ High | Best for reproducible workflows with full JSON audit trail |
+| Automated pipeline (Cursor/Claude Code) | ✅ High | Best for reproducible workflows with full JSON audit trail |
 | Sharing with external partners | ✅ High | Manual review of flagged items required |
 | Publishing quotes in reports | ⚠️ Medium-High | Human eyes on every quote that appears publicly |
 | Privacy team approval / audit trail | ✅ High | JSON logs from both steps serve as audit evidence |
@@ -130,6 +166,8 @@ passed on all sampled files.
 - English only
 - Structured interview format — less naturalistic than in-person interviews
 - Transcripts may have been partially pre-anonymized by the research platform
+- Chunking behaviour validated structurally but not yet tested on full-length
+  (60,000+ character) transcripts in production
 
 Run your own spot-check on your first batch to calibrate for your context.
 
@@ -142,5 +180,7 @@ If this skill misses real PII or produces excessive false positives, document:
 2. The approximate phrasing/context (do not share actual PII)
 3. Which step missed it (Presidio / local LLM / both)
 4. Whether it was caught by manual spot-check or not
+5. For false positives: whether the item appeared in a suppressed log or
+   was flagged and requires a new suppression entry
 
 This helps improve threshold settings and suppression lists for future versions.
