@@ -4,7 +4,14 @@ Transcript Anonymizer
 Uses Microsoft Presidio to detect and replace PII in .txt transcript files.
 Configured via directives.md. Run directly or invoked by Cursor AI.
 
-PII replaced: PERSON, EMAIL_ADDRESS, PHONE_NUMBER, ORGANIZATION
+PII replaced: PERSON, EMAIL_ADDRESS, PHONE_NUMBER, ORGANIZATION, LOCATION
+
+Changes from v1:
+- Added LOCATION to detected entity types
+- False positive suppression now logs suppressed hits (suppressed: true in PII log)
+  so you have an audit trail of what was intentionally skipped
+- Score threshold made explicit (MIN_SCORE = 0.4) and consistent with verify step
+- Suppressed hits written to a separate _suppressed_log for review
 """
 
 import argparse
@@ -21,7 +28,12 @@ from presidio_anonymizer.entities import OperatorConfig
 
 # --- Configuration -----------------------------------------------------------
 
-ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "ORGANIZATION"]
+ENTITIES = ["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER", "ORGANIZATION", "LOCATION"]
+
+# Minimum confidence score — results below this are discarded
+# Set to 0.4 to match the spirit of the original (catch more, let verify_pii.py
+# act as the quality gate). Raise to 0.6 if false positives are a problem.
+MIN_SCORE = 0.4
 
 # Maps each entity type to a readable placeholder prefix
 PLACEHOLDER_MAP = {
@@ -29,6 +41,7 @@ PLACEHOLDER_MAP = {
     "EMAIL_ADDRESS": "EMAIL",
     "PHONE_NUMBER": "PHONE",
     "ORGANIZATION": "COMPANY",
+    "LOCATION": "LOCATION",
 }
 
 # Regex patterns that should never be tagged as PII regardless of Presidio's verdict
@@ -40,7 +53,10 @@ FALSE_POSITIVE_PATTERNS = [
     ),  # ranges: 00:00:14 - 00:00:19
 ]
 
-# Well-known product/brand names Presidio misidentifies as PERSON
+# Well-known product/brand names Presidio misidentifies as PERSON.
+# IMPORTANT: Any participant whose first name matches an entry here will be
+# silently suppressed by Presidio. Review this list carefully before each study.
+# Suppressed hits are now logged to _suppressed_log.json for audit purposes.
 FALSE_POSITIVE_NAMES = {
     "gmail", "youtube", "google", "safari", "chrome", "firefox",
     "netflix", "spotify", "slack", "notion", "figma", "zoom",
@@ -71,8 +87,6 @@ def read_transcript_text(path: Path) -> str:
             return raw.decode(encoding)
         except UnicodeDecodeError:
             continue
-    # Stray MacRoman bytes (e.g. 0xD5 for a right single quote) break UTF-8;
-    # try before ISO-8859-1 so "we've" stays correct.
     for encoding in ("mac_roman", "iso-8859-1"):
         try:
             return raw.decode(encoding)
@@ -92,21 +106,43 @@ def build_engines():
 def anonymize_text(text: str, analyzer: AnalyzerEngine, anonymizer: AnonymizerEngine):
     """
     Analyze text for PII and replace with consistent placeholders.
-    Returns (anonymized_text, pii_log) where pii_log is a list of dicts.
+    Returns (anonymized_text, pii_log, suppressed_log).
+
+    pii_log      — list of replacements actually made
+    suppressed_log — list of detections that were suppressed as false positives
+                     (included for audit trail; these were NOT replaced)
     """
     results = analyzer.analyze(text=text, entities=ENTITIES, language="en")
 
-    # Filter out known false positives (timestamps, product names)
-    results = [
-        r for r in results
-        if not is_false_positive(text[r.start:r.end], r.entity_type)
-    ]
+    # Apply minimum score threshold
+    results = [r for r in results if r.score >= MIN_SCORE]
 
-    # Sort by position so we can build a replacement map with consistent labels
-    results_sorted = sorted(results, key=lambda r: r.start)
+    # Separate genuine detections from known false positives
+    kept_results = []
+    suppressed_log = []
+
+    for r in results:
+        span_text = text[r.start:r.end]
+        if is_false_positive(span_text, r.entity_type):
+            suppressed_log.append({
+                "original": span_text,
+                "type": r.entity_type,
+                "score": round(r.score, 2),
+                "reason": (
+                    "timestamp_pattern"
+                    if any(p.match(span_text.strip()) for p in FALSE_POSITIVE_PATTERNS)
+                    else "false_positive_names_list"
+                ),
+                "suppressed": True,
+            })
+        else:
+            kept_results.append(r)
+
+    # Sort by position for consistent label assignment
+    results_sorted = sorted(kept_results, key=lambda r: r.start)
 
     # Assign consistent placeholder labels per unique original value
-    label_counters = {k: 0 for k in PLACEHOLDER_MAP.values()}
+    label_counters = {v: 0 for v in PLACEHOLDER_MAP.values()}
     value_to_label = {}
     pii_log = []
 
@@ -126,23 +162,7 @@ def anonymize_text(text: str, analyzer: AnalyzerEngine, anonymizer: AnonymizerEn
                 "score": round(result.score, 2),
             })
 
-    # Build operator config: replace each entity with its consistent placeholder
-    # We do a manual pass to ensure consistency across repeated values
-    operators = {
-        entity: OperatorConfig("replace", {"new_value": "<TEMP>"})
-        for entity in ENTITIES
-    }
-
-    # Use Presidio anonymizer for the replacement pass, then fix up labels
-    anonymized = anonymizer.anonymize(
-        text=text,
-        analyzer_results=results,
-        operators=operators,
-    )
-    anonymized_text = anonymized.text
-
-    # Replace <TEMP> placeholders won't work for consistency — do it ourselves
-    # by rebuilding from scratch using sorted results (reverse order to preserve offsets)
+    # Rebuild text with replacements applied in reverse order to preserve offsets
     anonymized_text = text
     for result in sorted(results_sorted, key=lambda r: r.start, reverse=True):
         original = text[result.start:result.end]
@@ -150,11 +170,10 @@ def anonymize_text(text: str, analyzer: AnalyzerEngine, anonymizer: AnonymizerEn
         label = value_to_label.get(key, f"[{result.entity_type}]")
         anonymized_text = anonymized_text[:result.start] + label + anonymized_text[result.end:]
 
-    # Presidio often misses fragmented repeats (e.g. speaker names split across lines).
-    # Apply every logged literal globally, longest-first, so leftovers match the same tags.
+    # Spread logged replacements globally to catch fragmented repeats Presidio missed
     anonymized_text = apply_logged_string_replacements(anonymized_text, pii_log)
 
-    return anonymized_text, pii_log
+    return anonymized_text, pii_log, suppressed_log
 
 
 def apply_logged_string_replacements(text: str, pii_log: list[dict]) -> str:
@@ -173,7 +192,7 @@ def apply_logged_string_replacements(text: str, pii_log: list[dict]) -> str:
 
 def process_file(input_path: Path, output_dir: Path, log: bool = True):
     """
-    Anonymize a single .txt file. Writes anonymized output and optional JSON log.
+    Anonymize a single .txt file. Writes anonymized output, PII log, and suppressed log.
     """
     if not input_path.exists():
         print(f"ERROR: File not found: {input_path}")
@@ -188,7 +207,7 @@ def process_file(input_path: Path, output_dir: Path, log: bool = True):
     print(f"Analyzing: {input_path.name} ({len(text)} chars)")
 
     analyzer, anonymizer = build_engines()
-    anonymized_text, pii_log = anonymize_text(text, analyzer, anonymizer)
+    anonymized_text, pii_log, suppressed_log = anonymize_text(text, analyzer, anonymizer)
 
     # Write anonymized output
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -197,22 +216,39 @@ def process_file(input_path: Path, output_dir: Path, log: bool = True):
 
     out_file = output_dir / f"{stem}_anonymized_{timestamp}.txt"
     out_file.write_text(anonymized_text, encoding="utf-8")
-    print(f"Anonymized file written: {out_file}")
+    print(f"Anonymized file written:   {out_file}")
 
-    # Write PII log
-    if log and pii_log:
-        log_file = output_dir / f"{stem}_pii_log_{timestamp}.json"
-        log_file.write_text(
-            json.dumps(pii_log, indent=2, ensure_ascii=False), encoding="utf-8"
+    if log:
+        # Write PII replacement log
+        if pii_log:
+            log_file = output_dir / f"{stem}_pii_log_{timestamp}.json"
+            log_file.write_text(
+                json.dumps(pii_log, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            print(f"PII log written:           {log_file}")
+
+        # Write suppressed detections log (always write so absence is explicit)
+        suppressed_file = output_dir / f"{stem}_suppressed_log_{timestamp}.json"
+        suppressed_file.write_text(
+            json.dumps(suppressed_log, indent=2, ensure_ascii=False), encoding="utf-8"
         )
-        print(f"PII log written:        {log_file}")
+        if suppressed_log:
+            print(f"Suppressed detections log: {suppressed_file}")
+            print(f"  ⚠️  {len(suppressed_log)} detection(s) were suppressed as false positives.")
+            print(f"  Review the suppressed log to confirm none are real participant names.")
+        else:
+            print(f"Suppressed detections log: {suppressed_file} (empty — nothing suppressed)")
 
     # Summary
-    print(f"\nSummary: {len(pii_log)} unique PII items replaced")
+    print(f"\nSummary: {len(pii_log)} unique PII items replaced, {len(suppressed_log)} suppressed")
     for item in pii_log:
         print(f"  {item['original']!r:30s} → {item['replacement']} ({item['type']}, score: {item['score']})")
+    if suppressed_log:
+        print(f"\nSuppressed (not replaced):")
+        for item in suppressed_log:
+            print(f"  {item['original']!r:30s}   ({item['type']}, score: {item['score']}, reason: {item['reason']})")
 
-    return out_file, pii_log
+    return out_file, pii_log, suppressed_log
 
 
 def process_directory(input_dir: Path, output_dir: Path, log: bool = True):

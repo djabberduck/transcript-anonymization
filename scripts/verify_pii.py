@@ -14,6 +14,18 @@ Usage:
     python verify_pii.py <anonymized-folder>/ --output-dir <report-folder>/
     python verify_pii.py <anonymized-folder>/ --all   # check all files, not just sample
     python verify_pii.py <anonymized-folder>/ --url http://localhost:1234  # custom server URL
+
+Changes from v1:
+- Transcripts longer than CHUNK_SIZE are split into overlapping chunks and
+  each chunk is checked independently. Results are merged. This fixes the
+  hard 30k char truncation that silently left the second half of most
+  hour-long transcripts unchecked.
+- max_tokens raised from 1000 to 2500 to reduce truncated JSON responses
+  when many issues are found in a single chunk.
+- System prompt restructured for local model compatibility: each check type
+  is a numbered, explicit instruction rather than a prose description.
+  Quasi-identifier detection is called out as a distinct reasoning task.
+- parse_error responses now include the raw model output for diagnosis.
 """
 
 import argparse
@@ -39,8 +51,17 @@ DEFAULT_SAMPLE_SIZE = 3
 # LM Studio local server URL
 DEFAULT_LM_STUDIO_URL = "http://localhost:1234"
 
-# Approximate max chars to send per transcript
-MAX_CHARS = 30000
+# Chunk size in characters. Transcripts longer than this are split into
+# overlapping chunks to ensure full coverage.
+# ~30k chars ≈ 20–25 minutes of interview at typical transcription density.
+# Overlap ensures names or quasi-identifiers that span a chunk boundary
+# are not missed.
+CHUNK_SIZE = 28000
+CHUNK_OVERLAP = 2000  # characters of overlap between consecutive chunks
+
+# Max tokens for model response. Raised from 1000 to reduce truncated JSON
+# when a chunk contains many issues. 2500 supports ~15–20 detailed issues.
+MAX_TOKENS = 2500
 
 # Text values that the LLM may flag but should be suppressed as known
 # false positives in DuckDuckGo research transcripts.
@@ -51,59 +72,114 @@ SUPPRESSED_TEXTS = {
     "ddg",
 }
 
-SYSTEM_PROMPT = """You are a privacy auditor reviewing anonymized user research transcripts.
+# System prompt restructured for local model compatibility.
+# Explicit numbered instructions work better than prose for instruction-following
+# models. Quasi-identifier detection is broken out as a distinct reasoning task
+# with concrete examples.
+SYSTEM_PROMPT = """You are a privacy auditor. Your task is to find PII remaining in an anonymized research transcript.
 
-Presidio (a rule-based PII detector) has already made one pass and replaced
-common PII with placeholders like [PERSON_1], [COMPANY_1], [EMAIL_1], [PHONE_1].
+Presidio has already replaced common PII with placeholders like [PERSON_1], [COMPANY_1], [EMAIL_1], [PHONE_1], [LOCATION_1].
 
-Your job is to find anything Presidio may have missed. You are specifically
-looking for:
+You must check for FOUR categories of remaining PII:
 
-1. DIRECT PII (still present as real text, not yet replaced):
-   - Person names (first names, last names, full names, nicknames)
-   - Company or organization names
-   - Email addresses or phone numbers
-   - Physical addresses, postcodes, or specific locations tied to a person
-   - Social media handles or usernames
-   - URLs that identify a person or organization
+CATEGORY 1 — DIRECT PII (real text that should have been replaced):
+- Person names: first names, last names, full names, nicknames, handles
+- Organization names or employer names
+- Email addresses or phone numbers
+- Physical addresses, postcodes, city+street combinations
+- Social media handles, usernames, profile URLs
 
-2. INDIRECT / CONTEXTUAL PII (combinations that could re-identify someone):
-   - Role + location + industry combinations (e.g., "the only female VP of
-     Engineering at a Series B fintech in Austin")
-   - References to unique events tied to a person (e.g., "after my TEDx talk")
-   - Named colleagues, clients, or competitors mentioned in passing
-   - Internal project names or product codenames unique to a company
+CATEGORY 2 — NAMES PRESIDIO COMMONLY MISSES:
+- First names used alone: "I asked Sarah to..." or "then Dave said..."
+- Names after relationship words: "my manager Tom", "my colleague Lisa", "our CEO Mark"
+- Names in possessives: "John's team", "Maria's feedback", "Sarah's project"
+- Nicknames or shortened names not caught by NER
 
-3. STRUCTURAL PATTERNS Presidio misses:
-   - First names used alone without a surname ("I asked Sarah to...")
-   - Names following relationship words ("my manager Dave", "my colleague Tom")
-   - Names in possessives ("John's team", "Maria's approach")
+CATEGORY 3 — NAMED THIRD PARTIES:
+- Colleagues, clients, competitors, or public figures mentioned by name in passing
+- Examples: "I spoke to Jennifer at [COMPANY_1]", "similar to what Elon Musk did"
 
-For each issue found, provide:
-- The exact text that is problematic (quote it)
-- The type of PII risk (direct or indirect)
-- Why it is a risk
-- A suggested replacement
+CATEGORY 4 — INDIRECT IDENTIFIERS (combinations that could re-identify a participant):
+This requires reasoning, not just pattern matching. Ask yourself: could a determined person identify who said this, even without a name?
+- Role + company size + location combinations: "the only female VP of Engineering at a Series B fintech in Austin"
+- Unique career events: "after my TEDx talk", "when I sold my startup in 2019"
+- Rare role descriptions: "I run the only pediatric oncology unit in rural Montana"
+- Internal project codenames or product names unique to one company
+- Any combination of 3+ attributes (role, location, industry, team size, event) that narrows to a single person
 
-Respond ONLY with valid JSON. No preamble, no markdown fences.
+RULES:
+- Only flag text that is actually present and problematic. Do not flag placeholders like [PERSON_1].
+- For Category 4, only flag combinations that are genuinely re-identifying, not generic descriptions.
+- Be precise: quote the exact text that is the problem.
 
-If no issues are found, respond with:
+OUTPUT FORMAT:
+Respond ONLY with valid JSON. No preamble, no explanation outside the JSON, no markdown fences.
+
+If no issues found:
 {"status": "clean", "issues": [], "summary": "No PII detected."}
 
-If issues are found, respond with:
+If issues found:
 {
   "status": "issues_found",
   "issues": [
     {
-      "text": "exact problematic text",
+      "text": "exact problematic text quoted from the transcript",
       "type": "direct|indirect",
-      "category": "person_name|organization|location|indirect_identifier|other",
-      "risk": "brief explanation of the risk",
-      "suggestion": "suggested replacement or action"
+      "category": "person_name|organization|location|indirect_identifier|third_party_name|other",
+      "risk": "one sentence explaining the risk",
+      "suggestion": "suggested replacement text"
     }
   ],
-  "summary": "Brief plain-English summary of what was found"
+  "summary": "One or two sentence plain-English summary of what was found"
 }"""
+
+
+# --- Chunking ----------------------------------------------------------------
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[dict]:
+    """
+    Split text into overlapping chunks for sequential LLM processing.
+    Returns list of dicts with 'text', 'start', 'end', 'chunk_index'.
+
+    Overlap ensures PII near chunk boundaries is not missed. Duplicate
+    issues found in the overlap region are deduplicated after merging.
+    """
+    if len(text) <= chunk_size:
+        return [{"text": text, "start": 0, "end": len(text), "chunk_index": 0}]
+
+    chunks = []
+    start = 0
+    idx = 0
+
+    while start < len(text):
+        end = min(start + chunk_size, len(text))
+        chunks.append({
+            "text": text[start:end],
+            "start": start,
+            "end": end,
+            "chunk_index": idx,
+        })
+        if end == len(text):
+            break
+        start += chunk_size - overlap
+        idx += 1
+
+    return chunks
+
+
+def deduplicate_issues(issues: list[dict]) -> list[dict]:
+    """
+    Remove duplicate issues that appear in overlapping chunk regions.
+    Deduplicates on exact 'text' value, keeping first occurrence.
+    """
+    seen = set()
+    deduped = []
+    for issue in issues:
+        key = issue.get("text", "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(issue)
+    return deduped
 
 
 # --- Core logic --------------------------------------------------------------
@@ -139,23 +215,23 @@ def filter_false_positives(issues: list) -> tuple:
     return kept, suppressed
 
 
-def check_transcript(client: OpenAI, model: str, text: str, filename: str) -> dict:
+def check_chunk(client: OpenAI, model: str, chunk_text: str, filename: str, chunk_index: int, total_chunks: int) -> dict:
     """
-    Send a transcript to the local LLM for second-pass PII checking.
-    Returns parsed JSON response.
+    Send a single chunk to the local LLM for PII checking.
+    Returns parsed JSON response dict.
     """
-    truncated = False
-    if len(text) > MAX_CHARS:
-        text = text[:MAX_CHARS]
-        truncated = True
-
-    user_message = f"Please audit this anonymized transcript for any remaining PII:\n\n---\n{text}\n---"
+    chunk_note = f" [chunk {chunk_index + 1}/{total_chunks}]" if total_chunks > 1 else ""
+    user_message = (
+        f"Audit this anonymized transcript{chunk_note} for remaining PII. "
+        f"Follow all four categories in your instructions.\n\n---\n{chunk_text}\n---"
+    )
 
     raw = ""
     try:
         response = client.chat.completions.create(
             model=model,
-            max_tokens=1000,
+            max_tokens=MAX_TOKENS,
+            temperature=0.1,  # low temperature for consistent, literal output
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_message},
@@ -172,56 +248,121 @@ def check_transcript(client: OpenAI, model: str, text: str, filename: str) -> di
         raw = raw.strip()
 
         result = json.loads(raw)
-
-        # Apply false positive suppression
-        original_issues = result.get("issues", [])
-        kept, suppressed = filter_false_positives(original_issues)
-        result["issues"] = kept
-        result["suppressed"] = suppressed
-        if suppressed and not kept:
-            result["status"] = "clean"
-            result["summary"] = f"No PII detected. ({len(suppressed)} known false positive(s) suppressed.)"
-
-        result["filename"] = filename
-        result["truncated"] = truncated
+        result["chunk_index"] = chunk_index
         return result
 
     except json.JSONDecodeError as e:
         return {
-            "filename": filename,
+            "chunk_index": chunk_index,
             "status": "parse_error",
             "issues": [],
             "summary": f"Could not parse model response: {e}",
-            "truncated": truncated,
-            "raw_response": raw or "No response"
+            "raw_response": raw[:500] if raw else "No response",
         }
     except Exception as e:
         return {
-            "filename": filename,
+            "chunk_index": chunk_index,
             "status": "api_error",
             "issues": [],
             "summary": f"Error: {e}",
-            "truncated": truncated
         }
+
+
+def check_transcript(client: OpenAI, model: str, text: str, filename: str) -> dict:
+    """
+    Check a full transcript for PII, chunking if necessary.
+    Merges results across all chunks and deduplicates.
+    Returns a single result dict compatible with the original format.
+    """
+    chunks = chunk_text(text)
+    total_chunks = len(chunks)
+
+    if total_chunks > 1:
+        print(f"     Transcript length: {len(text):,} chars — splitting into {total_chunks} overlapping chunks")
+
+    all_issues = []
+    all_suppressed = []
+    chunk_errors = []
+    chunk_results = []
+
+    for chunk in chunks:
+        if total_chunks > 1:
+            print(f"     Checking chunk {chunk['chunk_index'] + 1}/{total_chunks} "
+                  f"(chars {chunk['start']:,}–{chunk['end']:,})...")
+
+        chunk_result = check_chunk(client, model, chunk["text"], filename, chunk["chunk_index"], total_chunks)
+        chunk_results.append(chunk_result)
+
+        status = chunk_result.get("status", "unknown")
+
+        if status in ("parse_error", "api_error"):
+            chunk_errors.append(chunk_result)
+        elif status in ("clean", "issues_found"):
+            issues = chunk_result.get("issues", [])
+            kept, suppressed = filter_false_positives(issues)
+            all_issues.extend(kept)
+            all_suppressed.extend(suppressed)
+
+        if chunk["chunk_index"] < total_chunks - 1:
+            time.sleep(0.3)
+
+    # Deduplicate across overlapping regions
+    all_issues = deduplicate_issues(all_issues)
+    all_suppressed = deduplicate_issues(all_suppressed)
+
+    # Build merged result
+    if chunk_errors and not all_issues:
+        # All errors, no usable output
+        status = "api_error" if any(c["status"] == "api_error" for c in chunk_errors) else "parse_error"
+        summary = f"{len(chunk_errors)} chunk(s) failed to process. " + chunk_errors[0].get("summary", "")
+    elif all_issues:
+        status = "issues_found"
+        summary = f"{len(all_issues)} issue(s) found across {total_chunks} chunk(s)."
+        if chunk_errors:
+            summary += f" Note: {len(chunk_errors)} chunk(s) had errors and may not have been fully checked."
+    else:
+        status = "clean"
+        summary = f"No PII detected across {total_chunks} chunk(s)."
+        if all_suppressed:
+            summary += f" ({len(all_suppressed)} known false positive(s) suppressed.)"
+        if chunk_errors:
+            summary = f"Errors in {len(chunk_errors)} chunk(s) — coverage may be incomplete."
+            status = "parse_error"
+
+    return {
+        "filename": filename,
+        "status": status,
+        "issues": all_issues,
+        "suppressed": all_suppressed,
+        "summary": summary,
+        "chunks_total": total_chunks,
+        "chunks_errored": len(chunk_errors),
+        "char_length": len(text),
+        "chunk_details": chunk_results if total_chunks > 1 else [],
+    }
 
 
 def print_result(result: dict):
     """Print a single file's result to terminal."""
     status = result.get("status", "unknown")
     filename = result.get("filename", "unknown")
-    truncated = result.get("truncated", False)
     suppressed = result.get("suppressed", [])
-    trunc_note = " [TRUNCATED — only first ~30000 chars checked]" if truncated else ""
+    chunks_total = result.get("chunks_total", 1)
+    chunks_errored = result.get("chunks_errored", 0)
+    char_length = result.get("char_length", 0)
+
+    chunk_note = f" [{chunks_total} chunk(s), {char_length:,} chars]" if chunks_total > 1 else f" [{char_length:,} chars]"
+    error_note = f" ⚠️ {chunks_errored} chunk(s) had errors" if chunks_errored else ""
 
     if status == "clean":
-        print(f"  ✅ PASS: {filename}{trunc_note}")
+        print(f"  ✅ PASS: {filename}{chunk_note}{error_note}")
         print(f"     {result.get('summary', '')}")
         if suppressed:
             print(f"     Suppressed false positives: {[s.get('text') for s in suppressed]}")
 
     elif status == "issues_found":
         issues = result.get("issues", [])
-        print(f"  ❌ ISSUES FOUND: {filename}{trunc_note} — {len(issues)} issue(s)")
+        print(f"  ❌ ISSUES FOUND: {filename}{chunk_note}{error_note} — {len(issues)} issue(s)")
         print(f"     Summary: {result.get('summary', '')}")
         for i, issue in enumerate(issues, 1):
             print(f"     Issue {i}: [{issue.get('type','?').upper()}] {issue.get('category','?')}")
@@ -232,7 +373,7 @@ def print_result(result: dict):
             print(f"     Suppressed false positives: {[s.get('text') for s in suppressed]}")
 
     elif status in ("parse_error", "api_error"):
-        print(f"  ⚠️  ERROR: {filename} — {result.get('summary', '')}")
+        print(f"  ⚠️  ERROR: {filename}{chunk_note} — {result.get('summary', '')}")
 
     else:
         print(f"  ?: {filename} — unknown status: {status}")
@@ -244,7 +385,7 @@ def process_folder(folder: Path, output_dir: Path, server_url: str, check_all: b
     """
     files = sorted(
         f for f in folder.glob("*.txt")
-        if "_pii_log" not in f.name
+        if "_pii_log" not in f.name and "_suppressed_log" not in f.name
     )
 
     if not files:
@@ -259,11 +400,13 @@ def process_folder(folder: Path, output_dir: Path, server_url: str, check_all: b
     model = get_loaded_model(client)
 
     print(f"\n── Second-Pass PII Verification (Local LLM) ──────────────────────")
-    print(f"   Folder:   {folder}")
-    print(f"   Files:    {total} total, checking {checking}")
-    print(f"   Mode:     {'all files' if check_all else f'sample of {checking}'}")
-    print(f"   Server:   {server_url}")
-    print(f"   Model:    {model}")
+    print(f"   Folder:     {folder}")
+    print(f"   Files:      {total} total, checking {checking}")
+    print(f"   Mode:       {'all files' if check_all else f'sample of {checking}'}")
+    print(f"   Server:     {server_url}")
+    print(f"   Model:      {model}")
+    print(f"   Chunk size: {CHUNK_SIZE:,} chars with {CHUNK_OVERLAP:,} char overlap")
+    print(f"   Max tokens: {MAX_TOKENS}")
     print()
 
     results = []
@@ -321,12 +464,15 @@ def process_folder(folder: Path, output_dir: Path, server_url: str, check_all: b
         "total_files": total,
         "files_checked": checking,
         "mode": "all" if check_all else "sample",
+        "chunk_size": CHUNK_SIZE,
+        "chunk_overlap": CHUNK_OVERLAP,
+        "max_tokens": MAX_TOKENS,
         "summary": {
             "clean": clean_count,
             "issues_found": issues_count,
-            "errors": error_count
+            "errors": error_count,
         },
-        "results": results
+        "results": results,
     }
 
     report_path.write_text(json.dumps(report, indent=2, ensure_ascii=False))
@@ -363,12 +509,22 @@ def main():
         default=DEFAULT_LM_STUDIO_URL,
         help=f"LM Studio server URL (default: {DEFAULT_LM_STUDIO_URL})."
     )
+    parser.add_argument(
+        "--chunk-size",
+        type=int,
+        default=CHUNK_SIZE,
+        help=f"Characters per chunk (default: {CHUNK_SIZE}). Reduce if model context is limited."
+    )
 
     args = parser.parse_args()
 
     if not args.folder.exists():
         print(f"ERROR: Folder not found: {args.folder}")
         sys.exit(1)
+
+    # Allow CLI override of chunk size
+    global CHUNK_SIZE
+    CHUNK_SIZE = args.chunk_size
 
     output_dir = args.output_dir or (args.folder / "local-llm-pii-reports")
     passed = process_folder(args.folder, output_dir, args.url, check_all=args.all)
