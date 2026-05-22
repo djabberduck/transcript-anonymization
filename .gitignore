@@ -4,3 +4,5 @@
 .venv/
 02-Input/
 02-Input-Anonymized/
+# Ignore OS files
+.DS_Store
